@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { TimeOfDay, ActionType, GameEventConfig, EventChoice, ResourceChangeRecord, ResourceChangeCategory } from '../types/game'
+import type { TimeOfDay, ActionType, GameEventConfig, EventChoice, ResourceChangeRecord, ResourceChangeCategory, DailyBalance } from '../types/game'
 import gameConfig from '../config/gameConfig'
 import {
   clamp,
@@ -42,6 +42,7 @@ export interface HistorySnapshot {
   collectedCards: string[]
   logs: LogEntry[]
   resourceChanges: ResourceChangeRecord[]
+  dailyBalances: DailyBalance[]
 }
 
 export const useGameStore = defineStore('game', () => {
@@ -68,6 +69,7 @@ export const useGameStore = defineStore('game', () => {
   const collectedCards = ref<string[]>([])
   const logs = ref<LogEntry[]>([])
   const resourceChanges = ref<ResourceChangeRecord[]>([])
+  const dailyBalances = ref<DailyBalance[]>([])
   const history = ref<HistorySnapshot[]>([])
   let logIdCounter = 0
   let resourceChangeIdCounter = 0
@@ -103,6 +105,9 @@ export const useGameStore = defineStore('game', () => {
     options?: { characterId?: string; giftId?: string; eventId?: string }
   ) {
     if (amount === 0) return
+    if (!getDailyBalance(day.value)) {
+      initDailyBalance(day.value, resources.value)
+    }
     resourceChanges.value.push({
       id: ++resourceChangeIdCounter,
       day: day.value,
@@ -115,6 +120,7 @@ export const useGameStore = defineStore('game', () => {
       eventId: options?.eventId,
       timestamp: Date.now()
     })
+    updateCurrentDayBalance()
   }
 
   const daysWithResourceChanges = computed(() => {
@@ -156,11 +162,22 @@ export const useGameStore = defineStore('game', () => {
       categoryLabel: getCategoryLabel(r.category)
     }))
     
-    const dayStartSnapshot = history.value.find(h => h.day === dayNum && h.timeSlot === gameConfig.timeSlots[0])
-    const dayStartResources = dayStartSnapshot?.resources ?? gameConfig.initialResources
+    let dayStartResources: number
+    let dayEndResources: number
     
-    const lastSnapshotOfDay = [...history.value].reverse().find(h => h.day === dayNum)
-    const dayEndResources = lastSnapshotOfDay?.resources ?? resources.value
+    if (dayNum === day.value) {
+      updateCurrentDayBalance()
+    }
+    
+    const balance = getDailyBalance(dayNum)
+    if (balance) {
+      dayStartResources = balance.startBalance
+      dayEndResources = balance.endBalance
+    } else {
+      const prevBalance = getDailyBalance(dayNum - 1)
+      dayStartResources = prevBalance ? prevBalance.endBalance : gameConfig.initialResources
+      dayEndResources = dayStartResources + totalIncome + totalExpense
+    }
     
     return {
       day: dayNum,
@@ -186,7 +203,47 @@ export const useGameStore = defineStore('game', () => {
     return labels[category]
   }
 
+  function getDailyBalance(dayNum: number): DailyBalance | undefined {
+    return dailyBalances.value.find(d => d.day === dayNum)
+  }
+
+  function initDailyBalance(dayNum: number, startBalance: number) {
+    const existing = getDailyBalance(dayNum)
+    if (existing) return existing
+    dailyBalances.value.push({
+      day: dayNum,
+      startBalance,
+      endBalance: startBalance,
+      totalIncome: 0,
+      totalExpense: 0,
+      isComplete: false
+    })
+  }
+
+  function updateCurrentDayBalance() {
+    const currentDayBalance = getDailyBalance(day.value)
+    if (!currentDayBalance) {
+      initDailyBalance(day.value, resources.value)
+      return
+    }
+    const changes = getResourceChangesByDay(day.value)
+    const income = changes.filter(r => r.amount > 0).reduce((sum, r) => sum + r.amount, 0)
+    const expense = changes.filter(r => r.amount < 0).reduce((sum, r) => sum + Math.abs(r.amount), 0)
+    currentDayBalance.totalIncome = income
+    currentDayBalance.totalExpense = expense
+    currentDayBalance.endBalance = currentDayBalance.startBalance + income - expense
+  }
+
+  function settleDailyBalance(dayNum: number) {
+    const balance = getDailyBalance(dayNum)
+    if (balance) {
+      updateCurrentDayBalance()
+      balance.isComplete = true
+    }
+  }
+
   function saveHistory() {
+    updateCurrentDayBalance()
     history.value.push({
       day: day.value,
       timeSlot: timeSlot.value,
@@ -197,7 +254,8 @@ export const useGameStore = defineStore('game', () => {
       triggeredEvents: [...triggeredEvents.value],
       collectedCards: [...collectedCards.value],
       logs: JSON.parse(JSON.stringify(logs.value)),
-      resourceChanges: JSON.parse(JSON.stringify(resourceChanges.value))
+      resourceChanges: JSON.parse(JSON.stringify(resourceChanges.value)),
+      dailyBalances: JSON.parse(JSON.stringify(dailyBalances.value))
     })
     if (history.value.length > 100) {
       history.value.shift()
@@ -217,6 +275,7 @@ export const useGameStore = defineStore('game', () => {
     collectedCards.value = [...snapshot.collectedCards]
     logs.value = JSON.parse(JSON.stringify(snapshot.logs))
     resourceChanges.value = JSON.parse(JSON.stringify(snapshot.resourceChanges))
+    dailyBalances.value = JSON.parse(JSON.stringify(snapshot.dailyBalances))
     history.value = history.value.slice(0, stepIndex)
     addLog('system', `回退到第 ${snapshot.day} 天 ${getTimeLabel(snapshot.timeSlot)}`)
   }
@@ -273,6 +332,11 @@ export const useGameStore = defineStore('game', () => {
   }
 
   function nextDay() {
+    const currentDayNum = day.value
+    settleDailyBalance(currentDayNum)
+    const currentDayBalance = getDailyBalance(currentDayNum)
+    const nextDayStartBalance = currentDayBalance ? currentDayBalance.endBalance : resources.value
+
     day.value++
     timeSlot.value = gameConfig.timeSlots[0]
     actionsRemaining.value = gameConfig.maxActionsPerDay
@@ -292,6 +356,7 @@ export const useGameStore = defineStore('game', () => {
       }
     })
 
+    initDailyBalance(day.value, nextDayStartBalance)
     addLog('system', `🌅 第 ${day.value} 天开始了`)
   }
 
@@ -547,19 +612,41 @@ export const useGameStore = defineStore('game', () => {
     collectedCards.value = []
     logs.value = []
     resourceChanges.value = []
+    dailyBalances.value = []
     history.value = []
     logIdCounter = 0
     resourceChangeIdCounter = 0
 
+    initDailyBalance(1, gameConfig.initialResources)
     addLog('system', '🎮 游戏开始！欢迎来到恋爱物语')
     checkAndTriggerEvent()
   }
 
   function initGame() {
     if (logs.value.length === 0) {
+      initDailyBalance(1, gameConfig.initialResources)
       addLog('system', '🎮 游戏开始！欢迎来到恋爱物语')
+    } else if (dailyBalances.value.length === 0 && resourceChanges.value.length > 0) {
+      rebuildDailyBalances()
     }
     checkAndTriggerEvent()
+  }
+
+  function rebuildDailyBalances() {
+    dailyBalances.value = []
+    const days = new Set<number>()
+    resourceChanges.value.forEach(r => days.add(r.day))
+    const sortedDays = Array.from(days).sort((a, b) => a - b)
+    
+    let currentBalance = gameConfig.initialResources
+    sortedDays.forEach(dayNum => {
+      initDailyBalance(dayNum, currentBalance)
+      updateCurrentDayBalance()
+      const balance = getDailyBalance(dayNum)
+      if (balance) {
+        currentBalance = balance.endBalance
+      }
+    })
   }
 
   return {
@@ -577,6 +664,7 @@ export const useGameStore = defineStore('game', () => {
     collectedCards,
     logs,
     resourceChanges,
+    dailyBalances,
     daysWithResourceChanges,
     history,
     currentEvent,
@@ -598,6 +686,8 @@ export const useGameStore = defineStore('game', () => {
     recordResourceChange,
     getResourceChangesByDay,
     getDaySummary,
-    getCategoryLabel
+    getCategoryLabel,
+    getDailyBalance,
+    updateCurrentDayBalance
   }
 })

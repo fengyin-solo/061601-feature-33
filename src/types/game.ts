@@ -98,6 +98,15 @@ export interface ResourceChangeRecord {
   timestamp: number
 }
 
+export interface DailyBalance {
+  day: number
+  startBalance: number
+  endBalance: number
+  totalIncome: number
+  totalExpense: number
+  isComplete: boolean
+}
+
 export interface GameConfig {
   title: string
   initialResources: number

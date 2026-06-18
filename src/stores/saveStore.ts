@@ -58,6 +58,7 @@ export const useSaveStore = defineStore('save', () => {
       collectedCards: gameStore.collectedCards,
       logs: gameStore.logs,
       resourceChanges: gameStore.resourceChanges,
+      dailyBalances: gameStore.dailyBalances,
       history: gameStore.history,
       darkMode: gameStore.darkMode
     }
@@ -78,6 +79,7 @@ export const useSaveStore = defineStore('save', () => {
       gameStore.collectedCards = state.collectedCards
       gameStore.logs = state.logs
       gameStore.resourceChanges = state.resourceChanges || []
+      gameStore.dailyBalances = state.dailyBalances || []
       gameStore.history = state.history
       gameStore.darkMode = state.darkMode
       return true
