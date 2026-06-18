@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { TimeOfDay, ActionType, GameEventConfig, EventChoice } from '../types/game'
+import type { TimeOfDay, ActionType, GameEventConfig, EventChoice, ResourceChangeRecord, ResourceChangeCategory } from '../types/game'
 import gameConfig from '../config/gameConfig'
 import {
   clamp,
@@ -41,6 +41,7 @@ export interface HistorySnapshot {
   triggeredEvents: string[]
   collectedCards: string[]
   logs: LogEntry[]
+  resourceChanges: ResourceChangeRecord[]
 }
 
 export const useGameStore = defineStore('game', () => {
@@ -66,8 +67,10 @@ export const useGameStore = defineStore('game', () => {
   const triggeredEvents = ref<string[]>([])
   const collectedCards = ref<string[]>([])
   const logs = ref<LogEntry[]>([])
+  const resourceChanges = ref<ResourceChangeRecord[]>([])
   const history = ref<HistorySnapshot[]>([])
   let logIdCounter = 0
+  let resourceChangeIdCounter = 0
 
   const unlockedCharacters = computed(() =>
     characters.value.filter(c => c.unlocked)
@@ -93,6 +96,96 @@ export const useGameStore = defineStore('game', () => {
     })
   }
 
+  function recordResourceChange(
+    amount: number,
+    category: ResourceChangeCategory,
+    description: string,
+    options?: { characterId?: string; giftId?: string; eventId?: string }
+  ) {
+    if (amount === 0) return
+    resourceChanges.value.push({
+      id: ++resourceChangeIdCounter,
+      day: day.value,
+      time: timeSlot.value,
+      amount,
+      category,
+      description,
+      characterId: options?.characterId,
+      giftId: options?.giftId,
+      eventId: options?.eventId,
+      timestamp: Date.now()
+    })
+  }
+
+  const daysWithResourceChanges = computed(() => {
+    const days = new Set<number>()
+    resourceChanges.value.forEach(r => days.add(r.day))
+    return Array.from(days).sort((a, b) => b - a)
+  })
+
+  function getResourceChangesByDay(dayNum: number) {
+    return resourceChanges.value.filter(r => r.day === dayNum)
+  }
+
+  function getDaySummary(dayNum: number) {
+    const changes = getResourceChangesByDay(dayNum)
+    const income = changes.filter(r => r.amount > 0)
+    const expense = changes.filter(r => r.amount < 0)
+    
+    const totalIncome = income.reduce((sum, r) => sum + r.amount, 0)
+    const totalExpense = expense.reduce((sum, r) => sum + r.amount, 0)
+    
+    const incomeByCategory = income.reduce((acc, r) => {
+      acc[r.category] = (acc[r.category] || 0) + r.amount
+      return acc
+    }, {} as Record<ResourceChangeCategory, number>)
+    
+    const expenseByCategory = expense.reduce((acc, r) => {
+      acc[r.category] = (acc[r.category] || 0) + Math.abs(r.amount)
+      return acc
+    }, {} as Record<ResourceChangeCategory, number>)
+    
+    const incomeDetails = income.map(r => ({
+      ...r,
+      categoryLabel: getCategoryLabel(r.category)
+    }))
+    
+    const expenseDetails = expense.map(r => ({
+      ...r,
+      amount: Math.abs(r.amount),
+      categoryLabel: getCategoryLabel(r.category)
+    }))
+    
+    const dayStartSnapshot = history.value.find(h => h.day === dayNum && h.timeSlot === gameConfig.timeSlots[0])
+    const dayStartResources = dayStartSnapshot?.resources ?? gameConfig.initialResources
+    
+    const lastSnapshotOfDay = [...history.value].reverse().find(h => h.day === dayNum)
+    const dayEndResources = lastSnapshotOfDay?.resources ?? resources.value
+    
+    return {
+      day: dayNum,
+      totalIncome,
+      totalExpense: Math.abs(totalExpense),
+      netChange: totalIncome + totalExpense,
+      incomeByCategory,
+      expenseByCategory,
+      incomeDetails,
+      expenseDetails,
+      dayStartResources,
+      dayEndResources
+    }
+  }
+
+  function getCategoryLabel(category: ResourceChangeCategory): string {
+    const labels: Record<ResourceChangeCategory, string> = {
+      work: '💼 打工收入',
+      gift: '🎁 购买礼物',
+      event: '📖 事件变化',
+      system: '⚙️ 系统调整'
+    }
+    return labels[category]
+  }
+
   function saveHistory() {
     history.value.push({
       day: day.value,
@@ -103,7 +196,8 @@ export const useGameStore = defineStore('game', () => {
       flags: [...flags.value],
       triggeredEvents: [...triggeredEvents.value],
       collectedCards: [...collectedCards.value],
-      logs: JSON.parse(JSON.stringify(logs.value))
+      logs: JSON.parse(JSON.stringify(logs.value)),
+      resourceChanges: JSON.parse(JSON.stringify(resourceChanges.value))
     })
     if (history.value.length > 100) {
       history.value.shift()
@@ -122,6 +216,7 @@ export const useGameStore = defineStore('game', () => {
     triggeredEvents.value = [...snapshot.triggeredEvents]
     collectedCards.value = [...snapshot.collectedCards]
     logs.value = JSON.parse(JSON.stringify(snapshot.logs))
+    resourceChanges.value = JSON.parse(JSON.stringify(snapshot.resourceChanges))
     history.value = history.value.slice(0, stepIndex)
     addLog('system', `回退到第 ${snapshot.day} 天 ${getTimeLabel(snapshot.timeSlot)}`)
   }
@@ -275,6 +370,10 @@ export const useGameStore = defineStore('game', () => {
     }
 
     resources.value -= giftConfig.price
+    recordResourceChange(-giftConfig.price, 'gift', `购买「${giftConfig.name}」送给 ${charConfig.name}`, {
+      characterId,
+      giftId
+    })
 
     const affinityChange = calculateGiftAffinity(
       giftId,
@@ -309,6 +408,7 @@ export const useGameStore = defineStore('game', () => {
     const { min, max } = gameConfig.workRewards
     const earned = randomInt(min, max)
     resources.value += earned
+    recordResourceChange(earned, 'work', `打工赚取了 ${earned} 代币`)
 
     characters.value.forEach(char => {
       if (char.unlocked) {
@@ -374,7 +474,15 @@ export const useGameStore = defineStore('game', () => {
     })
 
     if (choice.resourceChange !== undefined) {
-      resources.value = Math.max(0, resources.value + choice.resourceChange)
+      const change = choice.resourceChange
+      resources.value = Math.max(0, resources.value + change)
+      const event = currentEvent.value
+      recordResourceChange(change, 'event', 
+        change > 0 
+          ? `事件「${event?.title || '未知事件'}」获得 ${change} 代币`
+          : `事件「${event?.title || '未知事件'}」消耗 ${Math.abs(change)} 代币`,
+        { eventId: event?.id }
+      )
     }
 
     if (choice.unlockCharacterId) {
@@ -438,8 +546,10 @@ export const useGameStore = defineStore('game', () => {
     triggeredEvents.value = []
     collectedCards.value = []
     logs.value = []
+    resourceChanges.value = []
     history.value = []
     logIdCounter = 0
+    resourceChangeIdCounter = 0
 
     addLog('system', '🎮 游戏开始！欢迎来到恋爱物语')
     checkAndTriggerEvent()
@@ -466,6 +576,8 @@ export const useGameStore = defineStore('game', () => {
     triggeredEvents,
     collectedCards,
     logs,
+    resourceChanges,
+    daysWithResourceChanges,
     history,
     currentEvent,
     showEventModal,
@@ -482,6 +594,10 @@ export const useGameStore = defineStore('game', () => {
     toggleDarkMode,
     resetGame,
     initGame,
-    checkAndTriggerEvent
+    checkAndTriggerEvent,
+    recordResourceChange,
+    getResourceChangesByDay,
+    getDaySummary,
+    getCategoryLabel
   }
 })

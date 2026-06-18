@@ -6,6 +6,7 @@ const emit = defineEmits<{
   (e: 'toggle-save'): void
   (e: 'toggle-cards'): void
   (e: 'toggle-history'): void
+  (e: 'toggle-review'): void
   (e: 'toggle-theme'): void
   (e: 'reset'): void
 }>()
@@ -45,6 +46,9 @@ const gameStore = useGameStore()
       </button>
       <button class="toolbar-btn" @click="emit('toggle-history')" title="历史记录">
         📜
+      </button>
+      <button class="toolbar-btn" @click="emit('toggle-review')" title="按天复盘">
+        📊
       </button>
       <button class="toolbar-btn" @click="emit('toggle-save')" title="存档/读档">
         💾

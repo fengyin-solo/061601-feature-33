@@ -83,6 +83,21 @@ export interface ActionConfig {
   energyCost: number
 }
 
+export type ResourceChangeCategory = 'work' | 'gift' | 'event' | 'system'
+
+export interface ResourceChangeRecord {
+  id: number
+  day: number
+  time: TimeOfDay
+  amount: number
+  category: ResourceChangeCategory
+  description: string
+  characterId?: string
+  giftId?: string
+  eventId?: string
+  timestamp: number
+}
+
 export interface GameConfig {
   title: string
   initialResources: number
